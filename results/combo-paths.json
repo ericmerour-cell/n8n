@@ -1,0 +1,579 @@
+{
+  "openapi": "3.0.1",
+  "swagger": null,
+  "servers": [
+    {
+      "url": "/",
+      "description": "Current environment"
+    }
+  ],
+  "host": null,
+  "basePath": null,
+  "schemes": null,
+  "securityDefinitions": null,
+  "components_securitySchemes": {
+    "doorkeeper": {
+      "type": "http",
+      "scheme": "bearer"
+    }
+  },
+  "paths": {
+    "/api/v1/client_partners": {
+      "get": {
+        "summary": "List client partners",
+        "description": null,
+        "operationId": null,
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "description": "Filter by client partner name",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "security": null,
+        "responses": {
+          "200": {
+            "description": "List of client partners",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ClientPartner"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/client_partners/{client_partner_id}/employee_id_mappings": {
+      "get": {
+        "summary": "List employee ID mappings for a client partner",
+        "description": "Returns all employee identification code mappings associated with a given client partner. Used when a client partner needs to reference employees using their own identification codes.",
+        "operationId": null,
+        "parameters": [
+          {
+            "name": "client_partner_id",
+            "in": "path",
+            "required": true,
+            "description": "Partner-scoped unique identifier for the client partner",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "identification_code",
+            "in": "query",
+            "required": false,
+            "description": "Filter by a specific identification code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "security": null,
+        "responses": {
+          "200": {
+            "description": "List of employee ID mappings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EmployeeIdMapping"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create or update an employee ID mapping",
+        "description": "Creates a new employee ID mapping for the given membership and client partner. If a mapping already exists for that membership within this client partner, it will be updated with the new identification code.",
+        "operationId": null,
+        "parameters": [
+          {
+            "name": "client_partner_id",
+            "in": "path",
+            "required": true,
+            "description": "Partner-scoped unique identifier for the client partner",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmployeeIdMappingInput"
+              }
+            }
+          }
+        },
+        "security": null,
+        "responses": {
+          "201": {
+            "description": "Employee ID mapping created or updated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmployeeIdMapping"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Client partner or membership not found"
+          },
+          "422": {
+            "description": "Unprocessable Entity — validation failed"
+          }
+        }
+      }
+    },
+    "/api/v1/client_partners/{client_partner_id}/employee_id_mappings/{id}": {
+      "get": {
+        "summary": "Get a single employee ID mapping",
+        "description": null,
+        "operationId": null,
+        "parameters": [
+          {
+            "name": "client_partner_id",
+            "in": "path",
+            "required": true,
+            "description": "Partner-scoped unique identifier for the client partner",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Partner-scoped unique identifier for the employee ID mapping",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "security": null,
+        "responses": {
+          "200": {
+            "description": "The employee ID mapping",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmployeeIdMapping"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/locations": {
+      "get": {
+        "summary": "List locations",
+        "description": "Returns all locations accessible to the current partner account, including their teams.",
+        "operationId": null,
+        "parameters": null,
+        "requestBody": null,
+        "security": null,
+        "responses": {
+          "200": {
+            "description": "List of locations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Location"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/contracts": {
+      "get": {
+        "summary": "List contracts",
+        "description": "Returns all contracts active at the given location, optionally filtered to a specific day.",
+        "operationId": null,
+        "parameters": [
+          {
+            "name": "location_id",
+            "in": "query",
+            "required": true,
+            "description": "Partner-scoped unique identifier for the location to filter contracts by",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "day",
+            "in": "query",
+            "required": false,
+            "description": "Filter contracts active on this specific day (YYYY-MM-DD). Defaults to today.",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "requestBody": null,
+        "security": null,
+        "responses": {
+          "200": {
+            "description": "List of contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Contract"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/contracts/{id}/history": {
+      "get": {
+        "summary": "Get contract history",
+        "description": "Returns the full history of an original contract, including the contract itself and all non-virtual amendments ordered chronologically.",
+        "operationId": null,
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Partner-scoped unique identifier of the original contract (not an amendment)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "security": null,
+        "responses": {
+          "200": {
+            "description": "Contract with its amendment history, or null when the contract is not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "nullable": true,
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ContractHistory"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/past_contracts": {
+      "get": {
+        "summary": "List ended contracts",
+        "description": "Returns contracts whose contract_end date falls within the given date range. For each ended contract, returns the last permanent amendment (virtual = false, no amendment_end), or the original contract itself when no permanent amendment exists. Results are paginated (50 per page) and ordered chronologically by contract_end. start_date, end_date, and location_id are required.\n",
+        "operationId": null,
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "required": true,
+            "description": "Start of the date range (YYYY-MM-DD), inclusive, based on contract_end",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "required": true,
+            "description": "End of the date range (YYYY-MM-DD), inclusive, based on contract_end",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "location_id",
+            "in": "query",
+            "required": true,
+            "description": "Partner-scoped unique identifier of the location to filter results",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Page number (default 1)",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          }
+        ],
+        "requestBody": null,
+        "security": null,
+        "responses": {
+          "200": {
+            "description": "Paginated list of ended contracts, or null when location_id is unknown",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "nullable": true,
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/PastContractsResponse"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity — missing required parameters start_date, end_date, or location_id"
+          }
+        }
+      }
+    },
+    "/api/v1/plannings": {
+      "get": {
+        "summary": "List plannings (shifts)",
+        "description": "Returns all shifts for a given date range, optionally filtered by location or team.",
+        "operationId": null,
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "required": true,
+            "description": "Start of the date range (YYYY-MM-DD)",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "required": false,
+            "description": "End of the date range (YYYY-MM-DD). Defaults to start_date if not provided.",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "location_id",
+            "in": "query",
+            "required": false,
+            "description": "Partner-scoped unique identifier of the location to filter shifts by",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "team_id",
+            "in": "query",
+            "required": false,
+            "description": "Partner-scoped unique identifier of the team to filter shifts by",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "security": null,
+        "responses": {
+          "200": {
+            "description": "List of shifts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Planning"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/plannings/{id}": {
+      "get": {
+        "summary": "Get a single planning (shift)",
+        "description": null,
+        "operationId": null,
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Partner-scoped unique identifier for the shift",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "security": null,
+        "responses": {
+          "200": {
+            "description": "The shift object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Planning"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/rests": {
+      "get": {
+        "summary": "List rests (absences / time off)",
+        "description": "Returns all absence/rest events for a given location and date range.",
+        "operationId": null,
+        "parameters": [
+          {
+            "name": "location_id",
+            "in": "query",
+            "required": true,
+            "description": "Partner-scoped unique identifier for the location",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "start_date",
+            "in": "query",
+            "required": true,
+            "description": "Start of the date range (YYYY-MM-DD)",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "required": false,
+            "description": "End of the date range (YYYY-MM-DD)",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "requestBody": null,
+        "security": null,
+        "responses": {
+          "200": {
+            "description": "List of rest/absence events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Rest"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/revenues": {
+      "get": {
+        "summary": "List revenues",
+        "description": "Returns revenue entries for all locations in a given week.",
+        "operationId": null,
+        "parameters": [
+          {
+            "name": "week",
+            "in": "query",
+            "required": true,
+            "description": "Any date within the target week (YYYY-MM-DD). Returns revenues for the entire week containing this date.",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "requestBody": null,
+        "security": null,
+        "responses": {
+          "200": {
+            "description": "List of revenue entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Revenue"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create or update revenue",
+        "description": "Creates or updates a revenue entry for a location on a specific date.",
+        "operationId": null,
+        "parameters": null,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevenueInput"
+              }
+            }
+          }
+        },
+        "security": null,
+        "responses": {
+          "201": {
+            "description": "Revenue entry created or updated successfully"
+          },
+          "404": {
+            "description": "Location not found"
+          },
+          "422": {
+            "description": "Unprocessable Entity — missing both amount and estimated_amount"
+          }
+        }
+      }
+    }
+  }
+}
