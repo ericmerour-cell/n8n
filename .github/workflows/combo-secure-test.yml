@@ -1,0 +1,358 @@
+name: Secure Combo staff data test
+
+on:
+  push:
+    paths:
+      - '.github/workflows/combo-secure-test.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      EXCHANGE_ID: combo-test-f4e5e384
+      AAD_INPUT: combo-test-input-v1
+      AAD_OUTPUT: combo-test-output-v1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Python dependencies
+        run: python -m pip install --quiet requests cryptography python-dateutil
+
+      - name: Publish one-time input encryption key
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "exchange/$EXCHANGE_ID"
+          openssl genpkey -algorithm RSA -out "$RUNNER_TEMP/input_private.pem" -pkeyopt rsa_keygen_bits:3072 >/dev/null 2>&1
+          openssl rsa -pubout -in "$RUNNER_TEMP/input_private.pem" -out "exchange/$EXCHANGE_ID/input_public.pem" >/dev/null 2>&1
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add "exchange/$EXCHANGE_ID/input_public.pem"
+          git commit -m "Publish one-time Combo test input key" || true
+          git push
+
+      - name: Wait for encrypted test payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=0
+          for i in $(seq 1 120); do
+            git pull --rebase origin main >/dev/null 2>&1 || true
+            if [ -s "exchange/$EXCHANGE_ID/payload.json" ]; then
+              found=1
+              break
+            fi
+            sleep 5
+          done
+          if [ "$found" -ne 1 ]; then
+            echo "Encrypted payload was not received in time" >&2
+            exit 1
+          fi
+
+      - name: Query Combo and build aggregate diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64
+          import json
+          import math
+          import os
+          import unicodedata
+          from collections import defaultdict
+          from datetime import date, datetime, timedelta
+
+          import requests
+          from dateutil.parser import isoparse
+          from cryptography.hazmat.primitives import hashes, serialization
+          from cryptography.hazmat.primitives.asymmetric import padding
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+          exchange_id = os.environ['EXCHANGE_ID']
+          root = os.path.join('exchange', exchange_id)
+          aad_input = os.environ['AAD_INPUT'].encode()
+          aad_output = os.environ['AAD_OUTPUT'].encode()
+
+          with open(os.path.join(root, 'payload.json'), encoding='utf-8') as f:
+              envelope = json.load(f)
+          with open(os.path.join(os.environ['RUNNER_TEMP'], 'input_private.pem'), 'rb') as f:
+              input_private = serialization.load_pem_private_key(f.read(), password=None)
+
+          aes_key = input_private.decrypt(
+              base64.b64decode(envelope['encrypted_key']),
+              padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+          )
+          plaintext = AESGCM(aes_key).decrypt(
+              base64.b64decode(envelope['nonce']),
+              base64.b64decode(envelope['ciphertext']),
+              aad_input,
+          )
+          payload = json.loads(plaintext.decode('utf-8'))
+
+          period_start = date.fromisoformat(payload['start_date'])
+          period_end = date.fromisoformat(payload['end_date'])
+          tokens = payload['tokens']
+          base_url = 'https://partner.combohr.com'
+
+          def norm(value):
+              value = unicodedata.normalize('NFKD', str(value or ''))
+              value = ''.join(c for c in value if not unicodedata.combining(c))
+              return ' '.join(value.lower().replace('-', ' ').replace('/', ' ').split())
+
+          def choose_locations(label, locations):
+              if not locations:
+                  return []
+              label_n = norm(label)
+              aliases = []
+              if 'marcounet' in label_n:
+                  aliases = ['marcounet']
+              elif 'terre' in label_n:
+                  aliases = ['son de la terre', 'terre']
+              elif any(x in label_n for x in ['nanna', 'daphne', 'equite']):
+                  aliases = ['nanna', 'daphne', 'equite']
+              selected = [loc for loc in locations if any(a in norm(loc.get('name')) for a in aliases)]
+              if selected:
+                  return selected
+              return locations if len(locations) == 1 else []
+
+          def safe_get(session, path, params=None):
+              try:
+                  r = session.get(base_url + path, params=params, timeout=90)
+                  if r.status_code >= 400:
+                      return {'ok': False, 'status': r.status_code, 'error': r.text[:500], 'data': None, 'url': r.url}
+                  return {'ok': True, 'status': r.status_code, 'error': None, 'data': r.json(), 'url': r.url}
+              except Exception as exc:
+                  return {'ok': False, 'status': None, 'error': repr(exc), 'data': None, 'url': base_url + path}
+
+          def shift_date(shift):
+              raw = shift.get('date')
+              if raw:
+                  try:
+                      return date.fromisoformat(str(raw)[:10])
+                  except Exception:
+                      pass
+              raw = shift.get('starts_at')
+              if raw:
+                  try:
+                      return isoparse(raw).date()
+                  except Exception:
+                      pass
+              return None
+
+          def hours_between(start_raw, end_raw, break_minutes):
+              try:
+                  start = isoparse(start_raw)
+                  end = isoparse(end_raw)
+                  hours = (end - start).total_seconds() / 3600 - float(break_minutes or 0) / 60
+                  return max(0.0, hours)
+              except Exception:
+                  return 0.0
+
+          def unique_shifts(items):
+              out = {}
+              for item in items or []:
+                  key = item.get('id') or json.dumps(item, sort_keys=True, ensure_ascii=False)
+                  out[key] = item
+              return list(out.values())
+
+          result = {
+              'generated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+              'period': {'start': period_start.isoformat(), 'end': period_end.isoformat()},
+              'establishments': {},
+          }
+
+          query_ranges = {
+              'single_same': ('2026-08-09', '2026-08-09'),
+              'single_next': ('2026-08-09', '2026-08-10'),
+              'week_same': (period_start.isoformat(), period_end.isoformat()),
+              'week_next': (period_start.isoformat(), (period_end + timedelta(days=1)).isoformat()),
+          }
+
+          for label, token in tokens.items():
+              session = requests.Session()
+              session.headers.update({'Authorization': f'Bearer {token}', 'Accept': 'application/json'})
+              location_resp = safe_get(session, '/api/v1/locations')
+              all_locations = location_resp['data'] if location_resp['ok'] and isinstance(location_resp['data'], list) else []
+              locations = choose_locations(label, all_locations)
+              est = {
+                  'api_locations_status': location_resp['status'],
+                  'all_location_names': [loc.get('name') for loc in all_locations],
+                  'selected_locations': [],
+                  'query_diagnostics': {},
+                  'days': {},
+                  'totals': {'service_hours': 0.0, 'service_cost': 0.0, 'cuisine_hours': 0.0, 'cuisine_cost': 0.0, 'staff_hours': 0.0, 'staff_cost': 0.0},
+                  'coverage': {'shifts': 0, 'real_shifts': 0, 'planned_fallback_shifts': 0, 'missing_rate_shifts': 0, 'missing_rate_hours': 0.0, 'contract_matches': 0},
+                  'errors': [],
+              }
+              if not location_resp['ok']:
+                  est['errors'].append({'scope': 'locations', 'status': location_resp['status'], 'error': location_resp['error']})
+              if not locations:
+                  est['errors'].append({'scope': 'location_matching', 'error': 'No unambiguous location matched this establishment label'})
+
+              all_selected_shifts = []
+              contracts_by_day_and_location = {}
+
+              for loc in locations:
+                  location_id = loc.get('id') or loc.get('partner_id')
+                  teams = loc.get('teams') or []
+                  est['selected_locations'].append({'id': location_id, 'name': loc.get('name'), 'teams': [{'id': t.get('id'), 'name': t.get('name')} for t in teams]})
+                  loc_diag = {}
+                  query_payloads = {}
+
+                  for qname, (qstart, qend) in query_ranges.items():
+                      location_query = safe_get(session, '/api/v1/plannings', {'start_date': qstart, 'end_date': qend, 'location_id': location_id})
+                      location_items = location_query['data'] if location_query['ok'] and isinstance(location_query['data'], list) else []
+                      team_items = []
+                      team_counts = {}
+                      for team in teams:
+                          team_id = team.get('id')
+                          if not team_id:
+                              continue
+                          team_query = safe_get(session, '/api/v1/plannings', {'start_date': qstart, 'end_date': qend, 'location_id': location_id, 'team_id': team_id})
+                          items = team_query['data'] if team_query['ok'] and isinstance(team_query['data'], list) else []
+                          team_counts[team.get('name') or team_id] = {'status': team_query['status'], 'count': len(items)}
+                          team_items.extend(items)
+                          if not team_query['ok']:
+                              est['errors'].append({'scope': 'planning_team', 'location': loc.get('name'), 'team': team.get('name'), 'query': qname, 'status': team_query['status'], 'error': team_query['error']})
+                      team_items = unique_shifts(team_items)
+                      location_items = unique_shifts(location_items)
+                      loc_diag[qname] = {
+                          'start_date': qstart,
+                          'end_date': qend,
+                          'location_status': location_query['status'],
+                          'location_count': len(location_items),
+                          'location_dates': sorted({d.isoformat() for d in map(shift_date, location_items) if d}),
+                          'team_union_count': len(team_items),
+                          'team_union_dates': sorted({d.isoformat() for d in map(shift_date, team_items) if d}),
+                          'team_counts': team_counts,
+                      }
+                      query_payloads[qname] = team_items if team_items else location_items
+                      if not location_query['ok']:
+                          est['errors'].append({'scope': 'planning_location', 'location': loc.get('name'), 'query': qname, 'status': location_query['status'], 'error': location_query['error']})
+
+                  est['query_diagnostics'][loc.get('name') or location_id] = loc_diag
+                  candidate = query_payloads['week_same']
+                  if not any(shift_date(s) == period_end for s in candidate) and any(shift_date(s) == period_end for s in query_payloads['week_next']):
+                      candidate = query_payloads['week_next']
+                  candidate = [s for s in candidate if shift_date(s) and period_start <= shift_date(s) <= period_end]
+                  all_selected_shifts.extend(candidate)
+
+                  day_cursor = period_start
+                  while day_cursor <= period_end:
+                      contract_resp = safe_get(session, '/api/v1/contracts', {'location_id': location_id, 'day': day_cursor.isoformat()})
+                      contracts = contract_resp['data'] if contract_resp['ok'] and isinstance(contract_resp['data'], list) else []
+                      mapping = {}
+                      for contract in contracts:
+                          for key in [contract.get('id'), contract.get('original_contract_id')]:
+                              if key:
+                                  mapping[str(key)] = contract
+                      contracts_by_day_and_location[(day_cursor.isoformat(), str(location_id))] = mapping
+                      if not contract_resp['ok']:
+                          est['errors'].append({'scope': 'contracts', 'location': loc.get('name'), 'day': day_cursor.isoformat(), 'status': contract_resp['status'], 'error': contract_resp['error']})
+                      day_cursor += timedelta(days=1)
+
+              all_selected_shifts = unique_shifts(all_selected_shifts)
+              for current in (period_start + timedelta(days=i) for i in range((period_end - period_start).days + 1)):
+                  est['days'][current.isoformat()] = {
+                      'service_hours': 0.0, 'service_cost': 0.0,
+                      'cuisine_hours': 0.0, 'cuisine_cost': 0.0,
+                      'staff_hours': 0.0, 'staff_cost': 0.0,
+                      'shifts': 0, 'real_shifts': 0, 'planned_fallback_shifts': 0,
+                      'missing_rate_shifts': 0, 'missing_rate_hours': 0.0,
+                  }
+
+              for shift in all_selected_shifts:
+                  sday = shift_date(shift)
+                  if not sday or not (period_start <= sday <= period_end):
+                      continue
+                  has_real = bool(shift.get('real_starts_at') and shift.get('real_ends_at'))
+                  if has_real:
+                      hours = hours_between(shift.get('real_starts_at'), shift.get('real_ends_at'), shift.get('real_break_duration'))
+                  else:
+                      hours = hours_between(shift.get('starts_at'), shift.get('ends_at'), shift.get('break_duration'))
+                  location_id = str(shift.get('location_id') or '')
+                  contract_id = str(shift.get('contract_id') or '')
+                  contract = contracts_by_day_and_location.get((sday.isoformat(), location_id), {}).get(contract_id)
+                  if contract:
+                      est['coverage']['contract_matches'] += 1
+                  rate = contract.get('hourly_gross_rate') if contract else None
+                  try:
+                      rate = float(rate)
+                      if not math.isfinite(rate) or rate <= 0:
+                          raise ValueError
+                      missing_rate = False
+                  except Exception:
+                      rate = 12.0
+                      missing_rate = True
+                  cost = hours * rate
+                  category = 'cuisine' if norm(shift.get('team_name')) == 'cuisine' else 'service'
+                  day_data = est['days'][sday.isoformat()]
+                  day_data[f'{category}_hours'] += hours
+                  day_data[f'{category}_cost'] += cost
+                  day_data['staff_hours'] += hours
+                  day_data['staff_cost'] += cost
+                  day_data['shifts'] += 1
+                  est['coverage']['shifts'] += 1
+                  if has_real:
+                      day_data['real_shifts'] += 1
+                      est['coverage']['real_shifts'] += 1
+                  else:
+                      day_data['planned_fallback_shifts'] += 1
+                      est['coverage']['planned_fallback_shifts'] += 1
+                  if missing_rate:
+                      day_data['missing_rate_shifts'] += 1
+                      day_data['missing_rate_hours'] += hours
+                      est['coverage']['missing_rate_shifts'] += 1
+                      est['coverage']['missing_rate_hours'] += hours
+
+              for day_data in est['days'].values():
+                  for key in ['service_hours','service_cost','cuisine_hours','cuisine_cost','staff_hours','staff_cost','missing_rate_hours']:
+                      day_data[key] = round(day_data[key], 4)
+                  for key in ['service_hours','service_cost','cuisine_hours','cuisine_cost','staff_hours','staff_cost']:
+                      est['totals'][key] += day_data[key]
+              for key in est['totals']:
+                  est['totals'][key] = round(est['totals'][key], 4)
+              est['coverage']['missing_rate_hours'] = round(est['coverage']['missing_rate_hours'], 4)
+              result['establishments'][label] = est
+
+          output_bytes = json.dumps(result, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+          with open(os.path.join(root, 'output_public.pem'), 'rb') as f:
+              output_public = serialization.load_pem_public_key(f.read())
+          result_key = AESGCM.generate_key(bit_length=256)
+          result_nonce = os.urandom(12)
+          result_ciphertext = AESGCM(result_key).encrypt(result_nonce, output_bytes, aad_output)
+          encrypted_key = output_public.encrypt(
+              result_key,
+              padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+          )
+          encrypted_result = {
+              'version': 1,
+              'aad': os.environ['AAD_OUTPUT'],
+              'encrypted_key': base64.b64encode(encrypted_key).decode(),
+              'nonce': base64.b64encode(result_nonce).decode(),
+              'ciphertext': base64.b64encode(result_ciphertext).decode(),
+          }
+          with open(os.path.join(root, 'result.json'), 'w', encoding='utf-8') as f:
+              json.dump(encrypted_result, f, separators=(',', ':'))
+          PY
+
+      - name: Publish encrypted result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git pull --rebase origin main >/dev/null 2>&1 || true
+          if [ ! -s "exchange/$EXCHANGE_ID/result.json" ]; then
+            echo '{"error":"encrypted result was not produced"}' > "exchange/$EXCHANGE_ID/result.json"
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add "exchange/$EXCHANGE_ID/result.json"
+          git commit -m "Publish encrypted Combo staff test result" || true
+          git push || true
