@@ -1,0 +1,162 @@
+name: Compact secure Combo staff test
+
+on:
+  push:
+    paths:
+      - '.github/workflows/combo-compact-test.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      EXCHANGE_ID: combo-compact-7c91a6
+      AAD_INPUT: combo-compact-input-v1
+      AAD_OUTPUT: combo-compact-output-v1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - run: python -m pip install --quiet requests cryptography python-dateutil
+
+      - name: Publish one-time input key
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "exchange/$EXCHANGE_ID"
+          openssl genpkey -algorithm RSA -out "$RUNNER_TEMP/input_private.pem" -pkeyopt rsa_keygen_bits:3072 >/dev/null 2>&1
+          openssl rsa -pubout -in "$RUNNER_TEMP/input_private.pem" -out "exchange/$EXCHANGE_ID/input_public.pem" >/dev/null 2>&1
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add "exchange/$EXCHANGE_ID/input_public.pem"
+          git commit -m "Publish compact Combo test input key" || true
+          git push
+
+      - name: Wait for encrypted payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 120); do
+            git pull --rebase origin main >/dev/null 2>&1 || true
+            test -s "exchange/$EXCHANGE_ID/payload.json" && exit 0
+            sleep 5
+          done
+          exit 1
+
+      - name: Query Combo
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64,json,math,os,unicodedata
+          from collections import Counter
+          from datetime import date,datetime,timedelta
+          import requests
+          from dateutil.parser import isoparse
+          from cryptography.hazmat.primitives import hashes,serialization
+          from cryptography.hazmat.primitives.asymmetric import padding
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+          root=f"exchange/{os.environ['EXCHANGE_ID']}"
+          env=json.load(open(f"{root}/payload.json"))
+          priv=serialization.load_pem_private_key(open(os.path.join(os.environ['RUNNER_TEMP'],'input_private.pem'),'rb').read(),None)
+          key=priv.decrypt(base64.b64decode(env['encrypted_key']),padding.OAEP(mgf=padding.MGF1(hashes.SHA256()),algorithm=hashes.SHA256(),label=None))
+          payload=json.loads(AESGCM(key).decrypt(base64.b64decode(env['nonce']),base64.b64decode(env['ciphertext']),os.environ['AAD_INPUT'].encode()))
+          start=date.fromisoformat(payload['start_date']); end=date.fromisoformat(payload['end_date'])
+
+          def norm(s):
+            s=unicodedata.normalize('NFKD',str(s or ''))
+            return ' '.join(''.join(c for c in s if not unicodedata.combining(c)).lower().replace('-',' ').replace('/',' ').split())
+          def get(sess,path,params=None):
+            try:
+              r=sess.get('https://partner.combohr.com'+path,params=params,timeout=90)
+              return r.status_code,(r.json() if r.ok else None),(None if r.ok else r.text[:300])
+            except Exception as e: return None,None,repr(e)
+          def sdate(s):
+            try:return date.fromisoformat(str(s.get('date'))[:10])
+            except Exception:
+              try:return isoparse(s.get('starts_at')).date()
+              except Exception:return None
+          def hours(a,b,br):
+            try:return max(0,(isoparse(b)-isoparse(a)).total_seconds()/3600-float(br or 0)/60)
+            except Exception:return 0
+          def uniq(xs):
+            d={}
+            for x in xs or []: d[x.get('id') or json.dumps(x,sort_keys=True)]=x
+            return list(d.values())
+          def select(label,locs):
+            n=norm(label)
+            aliases=['marcounet'] if 'marcounet' in n else (['son de la terre','terre'] if 'terre' in n else ['nanna','daphne','equite'])
+            m=[x for x in locs if any(a in norm(x.get('name')) for a in aliases)]
+            return m or (locs if len(locs)==1 else [])
+
+          out={'period':[start.isoformat(),end.isoformat()],'establishments':{}}
+          for label,token in payload['tokens'].items():
+            sess=requests.Session(); sess.headers.update({'Authorization':f'Bearer {token}','Accept':'application/json'})
+            st,locs,err=get(sess,'/api/v1/locations'); locs=locs if isinstance(locs,list) else []
+            est={'locations_status':st,'locations_all':[x.get('name') for x in locs],'selected':[],'boundary':{},'daily':{},'totals':{},'coverage':{},'errors':[]}
+            shifts=[]; contracts={}
+            for loc in select(label,locs):
+              lid=loc.get('id') or loc.get('partner_id'); teams=loc.get('teams') or []
+              est['selected'].append({'name':loc.get('name'),'id':lid,'teams':[t.get('name') for t in teams]})
+              diag={}
+              selected_week=[]
+              for qn,qs,qe in [('day9_same','2026-08-09','2026-08-09'),('day9_next','2026-08-09','2026-08-10'),('week_same',start.isoformat(),end.isoformat()),('week_next',start.isoformat(),(end+timedelta(days=1)).isoformat())]:
+                st1,x1,e1=get(sess,'/api/v1/plannings',{'start_date':qs,'end_date':qe,'location_id':lid}); x1=uniq(x1 if isinstance(x1,list) else [])
+                tx=[]; tc={}
+                for t in teams:
+                  st2,x2,e2=get(sess,'/api/v1/plannings',{'start_date':qs,'end_date':qe,'location_id':lid,'team_id':t.get('id')}); x2=uniq(x2 if isinstance(x2,list) else [])
+                  tc[t.get('name') or t.get('id')]={'status':st2,'count':len(x2)}; tx.extend(x2)
+                tx=uniq(tx); chosen=tx or x1
+                diag[qn]={'status':st1,'location_count':len(x1),'team_union_count':len(tx),'dates':dict(Counter(d.isoformat() for d in map(sdate,chosen) if d)),'team_counts':tc}
+                if qn=='week_same': selected_week=chosen
+                if qn=='week_next' and not any(sdate(s)==end for s in selected_week) and any(sdate(s)==end for s in chosen): selected_week=chosen
+              est['boundary'][loc.get('name') or lid]=diag
+              shifts.extend([s for s in selected_week if sdate(s) and start<=sdate(s)<=end])
+              d=start
+              while d<=end:
+                cs,cl,ce=get(sess,'/api/v1/contracts',{'location_id':lid,'day':d.isoformat()}); cl=cl if isinstance(cl,list) else []
+                contracts[(d.isoformat(),str(lid))]={str(k):c for c in cl for k in [c.get('id'),c.get('original_contract_id')] if k}
+                if cs!=200: est['errors'].append({'scope':'contracts','day':d.isoformat(),'status':cs,'error':ce})
+                d+=timedelta(days=1)
+            shifts=uniq(shifts)
+            for i in range((end-start).days+1):
+              d=(start+timedelta(days=i)).isoformat(); est['daily'][d]={'service_h':0,'service_cost':0,'cuisine_h':0,'cuisine_cost':0,'staff_h':0,'staff_cost':0,'shifts':0,'real':0,'fallback':0,'rate_default':0}
+            match=missing=real=fallback=0
+            for s in shifts:
+              d=sdate(s)
+              if not d or not(start<=d<=end): continue
+              actual=bool(s.get('real_starts_at') and s.get('real_ends_at'))
+              h=hours(s.get('real_starts_at'),s.get('real_ends_at'),s.get('real_break_duration')) if actual else hours(s.get('starts_at'),s.get('ends_at'),s.get('break_duration'))
+              c=contracts.get((d.isoformat(),str(s.get('location_id') or '')),{}).get(str(s.get('contract_id') or ''))
+              if c: match+=1
+              try:
+                rate=float(c.get('hourly_gross_rate')) if c else 0
+                if rate<=0 or not math.isfinite(rate): raise ValueError
+              except Exception: rate=12; missing+=1
+              cat='cuisine' if norm(s.get('team_name'))=='cuisine' else 'service'; x=est['daily'][d.isoformat()]
+              x[cat+'_h']+=h; x[cat+'_cost']+=h*rate; x['staff_h']+=h; x['staff_cost']+=h*rate; x['shifts']+=1
+              if actual: x['real']+=1; real+=1
+              else: x['fallback']+=1; fallback+=1
+              if rate==12 and (not c or not c.get('hourly_gross_rate')): x['rate_default']+=1
+            for x in est['daily'].values():
+              for k in ['service_h','service_cost','cuisine_h','cuisine_cost','staff_h','staff_cost']: x[k]=round(x[k],2)
+            est['totals']={k:round(sum(x[k] for x in est['daily'].values()),2) for k in ['service_h','service_cost','cuisine_h','cuisine_cost','staff_h','staff_cost']}
+            est['coverage']={'shifts':len(shifts),'real':real,'fallback':fallback,'contract_matches':match,'missing_rate_shifts':missing}
+            out['establishments'][label]=est
+
+          raw=json.dumps(out,ensure_ascii=False,separators=(',',':')).encode()
+          pub=serialization.load_pem_public_key(open(f"{root}/output_public.pem",'rb').read())
+          k=AESGCM.generate_key(256); n=os.urandom(12); c=AESGCM(k).encrypt(n,raw,os.environ['AAD_OUTPUT'].encode())
+          ek=pub.encrypt(k,padding.OAEP(mgf=padding.MGF1(hashes.SHA256()),algorithm=hashes.SHA256(),label=None))
+          json.dump({'version':1,'aad':os.environ['AAD_OUTPUT'],'encrypted_key':base64.b64encode(ek).decode(),'nonce':base64.b64encode(n).decode(),'ciphertext':base64.b64encode(c).decode()},open('/tmp/combo-result.json','w'),separators=(',',':'))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: combo-compact-result
+          path: /tmp/combo-result.json
+          retention-days: 1
