@@ -28,7 +28,22 @@ jobs:
           r.raise_for_status()
           open('results/combo-swagger.yaml','w',encoding='utf-8').write(r.text)
           spec=yaml.safe_load(r.text)
-          out={'openapi':spec.get('openapi'),'swagger':spec.get('swagger'),'servers':spec.get('servers'),'host':spec.get('host'),'basePath':spec.get('basePath'),'schemes':spec.get('schemes'),'securityDefinitions':spec.get('securityDefinitions'),'components_securitySchemes':(spec.get('components') or {}).get('securitySchemes'),'paths':{}}
+          components=(spec.get('components') or {})
+          schemas=components.get('schemas') or {}
+          selected={}
+          for name, schema in schemas.items():
+            low=name.lower()
+            if any(k in low for k in ['planning','contract','location','team','membership','employee','revenue','rest']):
+              selected[name]=schema
+          out={
+            'openapi':spec.get('openapi'),
+            'servers':spec.get('servers'),
+            'securitySchemes':components.get('securitySchemes'),
+            'globalSecurity':spec.get('security'),
+            'paths':{},
+            'schemas':selected,
+            'schema_names':sorted(schemas.keys()),
+          }
           for path, methods in (spec.get('paths') or {}).items():
             out['paths'][path]={}
             for method, op in methods.items():
@@ -36,13 +51,12 @@ jobs:
               out['paths'][path][method.lower()]={
                 'summary':op.get('summary'),
                 'description':op.get('description'),
-                'operationId':op.get('operationId'),
                 'parameters':op.get('parameters'),
                 'requestBody':op.get('requestBody'),
                 'security':op.get('security'),
                 'responses':op.get('responses'),
               }
-          open('results/combo-paths.json','w',encoding='utf-8').write(json.dumps(out,ensure_ascii=False,indent=2))
+          open('results/combo-summary.json','w',encoding='utf-8').write(json.dumps(out,ensure_ascii=False,indent=2))
           PY
       - name: Commit result
         shell: bash
@@ -50,6 +64,6 @@ jobs:
           set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add results/combo-swagger.yaml results/combo-paths.json
-          git commit -m 'Update Combo API specification summary' || true
+          git add results/combo-swagger.yaml results/combo-summary.json
+          git commit -m 'Update Combo API schema summary' || true
           git push
