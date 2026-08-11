@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Fetch Swagger specification
+      - name: Build compact API model map
         shell: bash
         run: |
           set -euo pipefail
@@ -26,37 +26,25 @@ jobs:
           u='https://partner.combohr.com/api-docs/partner/swagger.yaml'
           r=requests.get(u, timeout=30)
           r.raise_for_status()
-          open('results/combo-swagger.yaml','w',encoding='utf-8').write(r.text)
           spec=yaml.safe_load(r.text)
-          components=(spec.get('components') or {})
-          schemas=components.get('schemas') or {}
-          selected={}
-          for name, schema in schemas.items():
+          schemas=((spec.get('components') or {}).get('schemas') or {})
+          keep=[]
+          for name in schemas:
             low=name.lower()
-            if any(k in low for k in ['planning','contract','location','team','membership','employee','revenue','rest']):
-              selected[name]=schema
-          out={
-            'openapi':spec.get('openapi'),
-            'servers':spec.get('servers'),
-            'securitySchemes':components.get('securitySchemes'),
-            'globalSecurity':spec.get('security'),
-            'paths':{},
-            'schemas':selected,
-            'schema_names':sorted(schemas.keys()),
-          }
-          for path, methods in (spec.get('paths') or {}).items():
-            out['paths'][path]={}
-            for method, op in methods.items():
-              if method.lower() not in {'get','post','put','patch','delete'}: continue
-              out['paths'][path][method.lower()]={
-                'summary':op.get('summary'),
-                'description':op.get('description'),
-                'parameters':op.get('parameters'),
-                'requestBody':op.get('requestBody'),
-                'security':op.get('security'),
-                'responses':op.get('responses'),
-              }
-          open('results/combo-summary.json','w',encoding='utf-8').write(json.dumps(out,ensure_ascii=False,indent=2))
+            if any(k in low for k in ['planning','contract','location','team','membership','employee','revenue','rest']): keep.append(name)
+          def compact(s):
+            if not isinstance(s,dict): return s
+            out={}
+            for k in ['$ref','type','format','description','nullable','example','enum','default','minimum','maximum']:
+              if k in s: out[k]=s[k]
+            if 'required' in s: out['required']=s['required']
+            if 'allOf' in s: out['allOf']=[compact(x) for x in s['allOf']]
+            if 'oneOf' in s: out['oneOf']=[compact(x) for x in s['oneOf']]
+            if 'items' in s: out['items']=compact(s['items'])
+            if 'properties' in s: out['properties']={k:compact(v) for k,v in s['properties'].items()}
+            return out
+          out={'schema_names':sorted(schemas.keys()),'models':{n:compact(schemas[n]) for n in keep}}
+          open('results/combo-models.json','w',encoding='utf-8').write(json.dumps(out,ensure_ascii=False,indent=2))
           PY
       - name: Commit result
         shell: bash
@@ -64,6 +52,6 @@ jobs:
           set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add results/combo-swagger.yaml results/combo-summary.json
-          git commit -m 'Update Combo API schema summary' || true
+          git add results/combo-models.json
+          git commit -m 'Update compact Combo model map' || true
           git push
