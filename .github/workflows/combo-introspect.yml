@@ -1,0 +1,51 @@
+name: Combo API introspection
+
+on:
+  push:
+    paths:
+      - '.github/workflows/combo-introspect.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Inspect Swagger endpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          python - <<'PY'
+          import json, requests, re
+          urls = [
+            'https://partner.combohr.com/swagger',
+            'https://partner.combohr.com/swagger/index.html',
+            'https://partner.combohr.com/swagger/v1/swagger.json',
+            'https://partner.combohr.com/swagger.json',
+            'https://partner.combohr.com/openapi.json',
+            'https://partner.combohr.com/api/swagger.json',
+          ]
+          out = {}
+          for u in urls:
+            try:
+              r=requests.get(u,timeout=30,allow_redirects=True)
+              out[u]={'status':r.status_code,'content_type':r.headers.get('content-type'),'final_url':r.url,'text':r.text[:20000]}
+            except Exception as e:
+              out[u]={'error':repr(e)}
+          open('results/combo-introspect.json','w').write(json.dumps(out,ensure_ascii=False,indent=2))
+          PY
+      - name: Commit result
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add results/combo-introspect.json
+          git commit -m 'Add Combo API introspection result' || true
+          git push
